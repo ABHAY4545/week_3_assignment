@@ -120,10 +120,14 @@ export function useRAGStream(): UseRAGStreamReturn {
         }
 
         setIsLoading(false);
+        setIsActive(false);
       } catch (error) {
         console.error("Stream error:", error);
+        setCurrentStage("error");
         setStatusMessage(
-          `Error: ${error instanceof Error ? error.message : "Unknown error"}`
+          error instanceof TypeError
+            ? "Cannot connect to the research service. Start the backend and try again."
+            : `Search failed: ${error instanceof Error ? error.message : "Unknown error"}`
         );
         setIsActive(false);
         setIsLoading(false);

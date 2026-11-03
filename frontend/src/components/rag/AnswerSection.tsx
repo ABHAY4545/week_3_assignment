@@ -2,11 +2,12 @@
 
 import { useEffect, useRef } from 'react'
 import { marked } from 'marked'
+import { uniqueSources, type Source } from './ReferencesSection'
 import hljs from 'highlight.js/lib/core'
 import javascript from 'highlight.js/lib/languages/javascript'
 import python from 'highlight.js/lib/languages/python'
 import bash from 'highlight.js/lib/languages/bash'
-import 'highlight.js/styles/github.min.css'
+import 'highlight.js/styles/github-dark.min.css'
 
 // Register languages
 hljs.registerLanguage('javascript', javascript)
@@ -15,21 +16,61 @@ hljs.registerLanguage('bash', bash)
 
 interface AnswerSectionProps {
   answer: string
+  sources: Source[]
   processingTime?: number
   isVisible: boolean
 }
 
-export function AnswerSection({ answer, processingTime, isVisible }: AnswerSectionProps) {
+export function AnswerSection({ answer, sources, processingTime, isVisible }: AnswerSectionProps) {
   const contentRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
+    let cancelled = false
     if (contentRef.current && answer) {
       // Render markdown (marked.parse can be sync or async depending on version)
       const renderMarkdown = async () => {
         try {
           const html = await marked.parse(answer)
-          if (contentRef.current) {
+          if (contentRef.current && !cancelled) {
             contentRef.current.innerHTML = html as string
+            const papers = uniqueSources(sources)
+            const normalize = (title: string) => title.trim().toLowerCase().replace(/\s+/g, ' ')
+            const walker = document.createTreeWalker(contentRef.current, NodeFilter.SHOW_TEXT)
+            const nodes: Text[] = []
+            while (walker.nextNode()) {
+              const node = walker.currentNode as Text
+              if (!node.parentElement?.closest('a, code, pre')) nodes.push(node)
+            }
+            for (const node of nodes) {
+              const text = node.textContent || ''
+              const fragment = document.createDocumentFragment()
+              let position = 0
+              let matched = false
+              for (const match of text.matchAll(/\[([^\]]+)\]/g)) {
+                const labels = match[1].split(';').map(normalize)
+                const indices = labels.map(label => papers.findIndex((paper, i) => normalize(paper.title) === label || String(i + 1) === label))
+                if (indices.some(index => index < 0)) continue
+                fragment.append(text.slice(position, match.index))
+                for (const index of Array.from(new Set(indices))) {
+                  const link = document.createElement('a')
+                  link.href = `#source-${index + 1}`
+                  link.className = 'inline-citation'
+                  link.textContent = `[${index + 1}]`
+                  link.title = papers[index].title
+                  link.setAttribute('aria-label', `Source ${index + 1}: ${papers[index].title}`)
+                  link.addEventListener('click', () => {
+                    const sidebar = document.querySelector('.sources-sidebar')
+                    const toggle = sidebar?.querySelector<HTMLButtonElement>('.sources-toggle')
+                    if (toggle && getComputedStyle(toggle).display !== 'none' && toggle.getAttribute('aria-expanded') === 'false') toggle.click()
+                    requestAnimationFrame(() => document.getElementById(`source-${index + 1}`)?.focus())
+                  })
+                  fragment.append(link)
+                }
+                position = match.index! + match[0].length
+                matched = true
+              }
+              if (matched) { fragment.append(text.slice(position)); node.replaceWith(fragment) }
+            }
             
             // Highlight code blocks after a brief delay to ensure DOM is updated
             setTimeout(() => {
@@ -42,48 +83,23 @@ export function AnswerSection({ answer, processingTime, isVisible }: AnswerSecti
           }
         } catch (error) {
           console.error('Error parsing markdown:', error)
-          if (contentRef.current) {
-            contentRef.current.innerHTML = answer
+          if (contentRef.current && !cancelled) {
+            contentRef.current.textContent = answer
           }
         }
       }
       
       renderMarkdown()
     }
-  }, [answer])
+    return () => { cancelled = true }
+  }, [answer, sources])
 
   if (!isVisible) return null
 
   return (
-    <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-      <div className="px-6 md:px-8 py-5 border-b border-gray-100 bg-gradient-to-r from-gray-50 to-white">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-2 h-2 bg-blue-600 rounded-full"></div>
-            <h3 className="text-lg md:text-xl font-semibold text-gray-900">Answer</h3>
-          </div>
-          {processingTime && (
-            <span className="text-xs md:text-sm text-gray-500 bg-gray-100 px-3 py-1 rounded-full font-medium">
-              {processingTime.toFixed(1)}s
-            </span>
-          )}
-        </div>
-      </div>
-      <div className="px-6 md:px-8 py-6 md:py-8">
-        <div
-          ref={contentRef}
-          className="prose prose-lg max-w-none 
-            prose-headings:text-gray-900 prose-headings:font-semibold
-            prose-p:text-gray-700 prose-p:leading-relaxed
-            prose-strong:text-gray-900 prose-strong:font-semibold
-            prose-code:text-gray-900 prose-code:bg-gray-100 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded prose-code:text-sm prose-code:font-mono
-            prose-pre:bg-gray-50 prose-pre:border prose-pre:border-gray-200 prose-pre:rounded-xl prose-pre:shadow-sm
-            prose-a:text-blue-600 prose-a:no-underline hover:prose-a:underline
-            prose-ul:text-gray-700 prose-ol:text-gray-700
-            prose-li:text-gray-700"
-        />
-      </div>
-    </div>
+    <section className="answer-panel" aria-label="Research answer">
+      <div className="result-heading"><h2 className="eyebrow">Answer</h2>{processingTime !== undefined && <span>{processingTime.toFixed(1)}s</span>}</div>
+      <div ref={contentRef} className="prose" />
+    </section>
   )
 }
-

@@ -13,6 +13,8 @@ Usage:
 """
 
 import asyncio
+from copy import copy
+from dataclasses import replace
 import time
 import os
 from pathlib import Path
@@ -24,7 +26,7 @@ from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnec
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import json
 
 try:
@@ -33,7 +35,8 @@ try:
 except ImportError:
     pass
 
-from test_backend_integration import RAGGenerator, GenerationConfig, SYSTEM_PROMPT
+from rag_generate import RAGGenerator, GenerationConfig, SYSTEM_PROMPT
+from comparison import compare_reranking, stream_comparison
 
 
 # Global instances
@@ -54,10 +57,8 @@ async def lifespan(app: FastAPI):
     print("="*60)
     
     config = GenerationConfig(
-        llm_provider="openai",
         retrieval_top_k=8,
-        refine_query=True,
-        use_reranker=True
+        refine_query=True
     )
     
     rag_generator = RAGGenerator(config)
@@ -103,6 +104,21 @@ class QueryResponse(BaseModel):
     processing_time: float
 
 
+def configured_generator(refine_query=True, use_reranker=True, temperature=None):
+    """Apply request settings without changing the shared generator."""
+    generator = copy(rag_generator)
+    generator.config = replace(
+        rag_generator.config,
+        refine_query=refine_query,
+        temperature=rag_generator.config.temperature if temperature is None else temperature,
+    )
+    generator.retrieval = copy(rag_generator.retrieval)
+    generator.retrieval.config = replace(
+        rag_generator.retrieval.config, use_reranker=use_reranker
+    )
+    return generator
+
+
 # API Endpoints
 @app.get("/health")
 async def health():
@@ -137,6 +153,9 @@ async def query_endpoint(request: QueryRequest):
     if not rag_generator:
         raise HTTPException(status_code=503, detail="RAG pipeline not initialized")
     
+    generator = configured_generator(
+        request.refine_query, request.use_reranker, request.temperature
+    )
     start_time = time.time()
     
     try:
@@ -144,7 +163,7 @@ async def query_endpoint(request: QueryRequest):
         loop = asyncio.get_event_loop()
         response = await loop.run_in_executor(
             None,
-            lambda: rag_generator.generate(
+            lambda: generator.generate(
                 request.query,
                 top_k=request.top_k,
                 return_sources=True
@@ -165,6 +184,64 @@ async def query_endpoint(request: QueryRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class ComparisonRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=2000)
+    top_k: int = Field(default=8, ge=1, le=15)
+    refine_query: bool = True
+    use_reranker: bool = True
+
+
+@app.post("/api/compare")
+async def compare_endpoint(request: ComparisonRequest):
+    """Compare reranking against the exact same hybrid-search candidates."""
+    if not rag_generator:
+        raise HTTPException(status_code=503, detail="RAG pipeline not initialized")
+    query = request.query.strip()
+    if not query:
+        raise HTTPException(status_code=422, detail="Enter a research question.")
+    generator = configured_generator(request.refine_query, True, temperature=0)
+    try:
+        return await asyncio.to_thread(compare_reranking, generator, query, request.top_k, request.use_reranker)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    except RuntimeError as error:
+        raise HTTPException(status_code=502, detail=str(error))
+    except Exception:
+        raise HTTPException(status_code=502, detail="Comparison failed while contacting the research services. Please try again.")
+
+
+@app.post("/api/compare/stream")
+async def compare_stream_endpoint(request: ComparisonRequest):
+    if not rag_generator:
+        raise HTTPException(status_code=503, detail="RAG pipeline not initialized")
+    query = request.query.strip()
+    if not query:
+        raise HTTPException(status_code=422, detail="Enter a research question.")
+    generator = configured_generator(request.refine_query, True, temperature=0)
+    if not generator.retrieval.config.cohere_api_key:
+        raise HTTPException(status_code=400, detail="Comparison requires COHERE_API_KEY. Configure it and restart the backend.")
+
+    async def events():
+        iterator = stream_comparison(generator, query, request.top_k, request.use_reranker)
+        sentinel = object()
+        def advance():
+            return next(iterator, sentinel)
+        try:
+            while True:
+                event = await asyncio.to_thread(advance)
+                if event is sentinel:
+                    break
+                yield f"data: {json.dumps(event)}\n\n"
+        except (ValueError, RuntimeError) as error:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(error)})}\n\n"
+        except Exception:
+            yield f"data: {json.dumps({'type': 'error', 'message': 'Comparison failed while contacting the research services. Please retry.'})}\n\n"
+
+    return StreamingResponse(events(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+    })
+
+
 async def stream_rag_response(
     query: str,
     top_k: int = 8,
@@ -179,6 +256,7 @@ async def stream_rag_response(
         """Format SSE event."""
         return f"data: {json.dumps({'type': event_type, **data})}\n\n"
     
+    generator = configured_generator(refine_query, use_reranker)
     start_time = time.time()
     loop = asyncio.get_event_loop()
     
@@ -190,7 +268,7 @@ async def stream_rag_response(
             
             refined = await loop.run_in_executor(
                 None,
-                lambda: rag_generator.refine_query(query)
+                lambda: generator.refine_query(query)
             )
             
             if refined != query:
@@ -206,7 +284,7 @@ async def stream_rag_response(
         
         results = await loop.run_in_executor(
             None,
-            lambda: rag_generator.retrieval.retrieve(refined, top_k=top_k)
+            lambda: generator.retrieval.retrieve(refined, top_k=top_k)
         )
         
         if not results:
@@ -225,8 +303,8 @@ async def stream_rag_response(
         yield emit("progress", {"message": "Generating answer...", "stage": "generating"})
         
         # Format context and build sources
-        context = rag_generator._format_context(results)
-        sources_metadata = rag_generator._build_sources_metadata(results)
+        context = generator._format_context(results)
+        sources_metadata = generator._build_sources_metadata(results)
         
         # Build prompt
         user_message = f"""Based on the following research paper excerpts, answer this question:
@@ -246,27 +324,29 @@ IMPORTANT: You have been provided with {len(results)} paper excerpts. Make sure 
         import requests
         
         headers = {
-            "Authorization": f"Bearer {rag_generator.openrouter_api_key}",
+            "Authorization": f"Bearer {generator.openrouter_api_key}",
             "Content-Type": "application/json"
         }
         
         payload = {
-            "model": f"openai/{rag_generator.config.llm_model}",
+            "model": generator.config.llm_model,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_message}
             ],
-            "temperature": rag_generator.config.temperature,
-            "max_tokens": rag_generator.config.max_tokens,
+            "temperature": generator.config.temperature,
+            "max_tokens": generator.config.max_tokens,
             "stream": True
         }
         
         response = requests.post(
-            f"{rag_generator.openrouter_base_url}/chat/completions",
+            f"{generator.openrouter_base_url}/chat/completions",
             headers=headers,
             json=payload,
-            stream=True
+            stream=True,
+            timeout=(10, 120)
         )
+        response.raise_for_status()
         
         answer_chunks = []
         for line in response.iter_lines():
@@ -278,6 +358,10 @@ IMPORTANT: You have been provided with {len(results)} paper excerpts. Make sure 
                         break
                     try:
                         chunk = json.loads(data)
+                        if "error" in chunk:
+                            raise RuntimeError(f"OpenRouter stream error: {chunk['error']}")
+                        if not chunk.get("choices"):
+                            continue
                         if chunk["choices"][0]["delta"].get("content"):
                             content = chunk["choices"][0]["delta"]["content"]
                             answer_chunks.append(content)
@@ -291,7 +375,7 @@ IMPORTANT: You have been provided with {len(results)} paper excerpts. Make sure 
         processing_time = time.time() - start_time
         yield emit("complete", {
             "answer": answer,
-            "sources": list(sources_metadata.values()),
+            "sources": sources_metadata,
             "refined_query": refined if refined != query else None,
             "processing_time": processing_time
         })
@@ -350,11 +434,12 @@ async def websocket_query(websocket: WebSocket):
             await websocket.close()
             return
         
+        generator = configured_generator(refine_query_flag, use_reranker)
         start_time = time.time()
         loop = asyncio.get_event_loop()
         
         # Get total chunks count
-        total_chunks = len(rag_generator.retrieval.chunks)
+        total_chunks = len(generator.retrieval.chunks)
         
         # Stage 1: Query Refinement
         refined = query
@@ -367,7 +452,7 @@ async def websocket_query(websocket: WebSocket):
             
             refined = await loop.run_in_executor(
                 None,
-                lambda: rag_generator.refine_query(query)
+                lambda: generator.refine_query(query)
             )
             
             if refined != query:
@@ -389,11 +474,9 @@ async def websocket_query(websocket: WebSocket):
         # Use the full retrieve method which handles everything properly
         results = await loop.run_in_executor(
             None,
-            lambda: rag_generator.retrieval.retrieve(
+            lambda: generator.retrieval.retrieve(
                 refined, 
                 top_k=top_k,
-                use_hybrid=True,
-                use_reranker=use_reranker
             )
         )
         
@@ -415,12 +498,12 @@ async def websocket_query(websocket: WebSocket):
         await websocket.send_json({
             "type": "progress",
             "stage": "generating",
-            "message": "Generating answer with GPT-4..."
+            "message": "Generating answer..."
         })
         
         # Format context and build sources
-        context = rag_generator._format_context(results)
-        sources_metadata = rag_generator._build_sources_metadata(results)
+        context = generator._format_context(results)
+        sources_metadata = generator._build_sources_metadata(results)
         
         # Build prompt
         user_message = f"""Based on the following research paper excerpts, answer this question:
@@ -440,27 +523,29 @@ IMPORTANT: You have been provided with {len(results)} paper excerpts. Make sure 
         import requests
         
         headers = {
-            "Authorization": f"Bearer {rag_generator.openrouter_api_key}",
+            "Authorization": f"Bearer {generator.openrouter_api_key}",
             "Content-Type": "application/json"
         }
         
         payload = {
-            "model": f"openai/{rag_generator.config.llm_model}",
+            "model": generator.config.llm_model,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_message}
             ],
-            "temperature": rag_generator.config.temperature,
-            "max_tokens": rag_generator.config.max_tokens,
+            "temperature": generator.config.temperature,
+            "max_tokens": generator.config.max_tokens,
             "stream": True
         }
         
         response = requests.post(
-            f"{rag_generator.openrouter_base_url}/chat/completions",
+            f"{generator.openrouter_base_url}/chat/completions",
             headers=headers,
             json=payload,
-            stream=True
+            stream=True,
+            timeout=(10, 120)
         )
+        response.raise_for_status()
         
         answer_chunks = []
         for line in response.iter_lines():
@@ -472,6 +557,10 @@ IMPORTANT: You have been provided with {len(results)} paper excerpts. Make sure 
                         break
                     try:
                         chunk = json.loads(data_str)
+                        if "error" in chunk:
+                            raise RuntimeError(f"OpenRouter stream error: {chunk['error']}")
+                        if not chunk.get("choices"):
+                            continue
                         if chunk["choices"][0]["delta"].get("content"):
                             content = chunk["choices"][0]["delta"]["content"]
                             answer_chunks.append(content)
@@ -489,7 +578,7 @@ IMPORTANT: You have been provided with {len(results)} paper excerpts. Make sure 
         await websocket.send_json({
             "type": "complete",
             "answer": answer,
-            "sources": list(sources_metadata.values()),
+            "sources": sources_metadata,
             "refined_query": refined if refined != query else None,
             "processing_time": processing_time
         })

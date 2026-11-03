@@ -55,3 +55,36 @@ backend/*.pyc
 
 
 *.npz
+
+
+
+# Dependencies
+node_modules/
+.next/
+venv/
+__pycache__/
+
+# Environment variables
+.env
+.env.local
+.env*.local
+
+# Build outputs
+/build
+/dist
+/.next/
+/out/
+
+# OS files
+.DS_Store
+*.log
+
+# IDE
+.vscode/
+.idea/
+# Isolated frontend verification output
+frontend/.next-review/
+frontend/.next-ui/
+
+# Local assistant output
+Claude outputs/

@@ -806,3 +806,22 @@ If you encounter issues:
 ---
 
 **Good luck building your RAG application! 🚀**
+
+## Assignment demo: compare reranking
+
+1. Enter a research question, for example “How does 3D Gaussian splatting work?”
+2. Select **Compare reranking**, choose an excerpt count, and submit. Rankings appear first; the two answers then stream in sequence, automatically selecting the answer being generated.
+3. Inspect the two ranked excerpt lists. Expand an excerpt to inspect its evidence.
+4. Switch between **Answer without reranking** and **Answer with reranking**. Numbered citations open the matching source in the sidebar.
+
+The comparison refines the query once and runs hybrid retrieval once. The baseline takes the top excerpts from that shared candidate pool; the other selection reranks the same candidates through Cohere. Both answers use the configured `LLM_MODEL` with temperature 0 and the same prompt. The app reports changed ranking positions, shared excerpts, and the extra reranking time. Retrieval times exclude query refinement and answer generation.
+
+Hybrid scores and Cohere relevance scores use different scales. A changed ranking is an observation, not an automatic quality improvement: assess relevance by reading the excerpts and checking the cited answers. Separate model calls can produce different wording even with the same settings.
+
+`COHERE_API_KEY` is required for comparison. A failed reranker is reported explicitly rather than silently showing hybrid results as reranked. If one answer fails, both rankings, any partial answer, and the other answer remain available. The UI consumes `POST /api/compare/stream` as server-sent events. Normal single-search mode continues to use its existing fallback behavior.
+
+Run the isolated comparison checks without provider calls:
+
+```bash
+python3 -m unittest discover -s backend -p test_comparison.py -v
+```
