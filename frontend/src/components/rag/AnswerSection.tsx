@@ -2,12 +2,14 @@
 
 import { useEffect, useRef } from 'react'
 import { marked } from 'marked'
+import katex from 'katex'
 import { uniqueSources, type Source } from './ReferencesSection'
 import hljs from 'highlight.js/lib/core'
 import javascript from 'highlight.js/lib/languages/javascript'
 import python from 'highlight.js/lib/languages/python'
 import bash from 'highlight.js/lib/languages/bash'
 import 'highlight.js/styles/github-dark.min.css'
+import 'katex/dist/katex.min.css'
 
 // Register languages
 hljs.registerLanguage('javascript', javascript)
@@ -21,25 +23,86 @@ interface AnswerSectionProps {
   isVisible: boolean
 }
 
+type Math = { tex: string; display: boolean }
+
+/** Pull LaTeX out before markdown runs (it would mangle _, ^ and \), leaving placeholders. */
+function extractMath(text: string): { text: string; math: Math[] } {
+  const math: Math[] = []
+  const stash = (tex: string, display: boolean) => {
+    math.push({ tex: tex.trim(), display })
+    return `@@MATH${math.length - 1}@@`
+  }
+  // Even indexes are prose; odd indexes are code, which must stay untouched.
+  const parts = text.split(/(```[\s\S]*?```|`[^`\n]*`)/g)
+  const out = parts
+    .map((part, i) => {
+      if (i % 2 === 1) return part
+      return part
+        .replace(/\$\$([\s\S]+?)\$\$/g, (_, t) => stash(t, true))
+        .replace(/\\\[([\s\S]+?)\\\]/g, (_, t) => stash(t, true))
+        .replace(/\\\(([\s\S]+?)\\\)/g, (_, t) => stash(t, false))
+        // $x$ but not currency like "$5 and $10": no space inside the dollar signs
+        .replace(/(?<![\\$\w])\$(?!\s)([^$\n]+?)(?<!\s)\$(?![\w$])/g, (_, t) => stash(t, false))
+    })
+    .join('')
+  return { text: out, math }
+}
+
+function renderMath(html: string, math: Math[]) {
+  return html.replace(/@@MATH(\d+)@@/g, (whole, n) => {
+    const item = math[Number(n)]
+    if (!item) return whole
+    try {
+      return katex.renderToString(item.tex, { displayMode: item.display, throwOnError: false })
+    } catch {
+      return item.tex
+    }
+  })
+}
+
+const normalize = (title: string) => title.trim().toLowerCase().replace(/\s+/g, ' ')
+
+/** Resolve a bracket label like "Paper Title", "1", "Source 1, Source 3" to source-list indexes. */
+function resolveLabel(label: string, papers: Source[]): number[] | null {
+  const byToken = (token: string): number | null => {
+    const t = normalize(token)
+    const byTitle = papers.findIndex(paper => normalize(paper.title) === t)
+    if (byTitle >= 0) return byTitle
+    const match = t.match(/^(sources?|excerpts?|papers?)?\s*(\d+)$/)
+    if (!match) return null
+    const n = Number(match[2])
+    if (match[1]) {
+      // "Source 3" is the model's excerpt number; each paper lists the excerpts it supplied.
+      const index = papers.findIndex(paper => paper.excerpts?.includes(n))
+      return index >= 0 ? index : null
+    }
+    return n >= 1 && n <= papers.length ? n - 1 : null
+  }
+  for (const separator of [/\s*;\s*/, /\s*(?:[;,&]|\band\b)\s*/]) {
+    const indexes = label.split(separator).map(byToken)
+    if (indexes.every(index => index !== null)) return indexes as number[]
+  }
+  return null
+}
+
 export function AnswerSection({ answer, sources, processingTime, isVisible }: AnswerSectionProps) {
   const contentRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     let cancelled = false
     if (contentRef.current && answer) {
-      // Render markdown (marked.parse can be sync or async depending on version)
       const renderMarkdown = async () => {
         try {
-          const html = await marked.parse(answer)
+          const { text, math } = extractMath(answer)
+          const html = renderMath((await marked.parse(text)) as string, math)
           if (contentRef.current && !cancelled) {
-            contentRef.current.innerHTML = html as string
+            contentRef.current.innerHTML = html
             const papers = uniqueSources(sources)
-            const normalize = (title: string) => title.trim().toLowerCase().replace(/\s+/g, ' ')
             const walker = document.createTreeWalker(contentRef.current, NodeFilter.SHOW_TEXT)
             const nodes: Text[] = []
             while (walker.nextNode()) {
               const node = walker.currentNode as Text
-              if (!node.parentElement?.closest('a, code, pre')) nodes.push(node)
+              if (!node.parentElement?.closest('a, code, pre, .katex')) nodes.push(node)
             }
             for (const node of nodes) {
               const text = node.textContent || ''
@@ -47,9 +110,8 @@ export function AnswerSection({ answer, sources, processingTime, isVisible }: An
               let position = 0
               let matched = false
               for (const match of text.matchAll(/\[([^\]]+)\]/g)) {
-                const labels = match[1].split(';').map(normalize)
-                const indices = labels.map(label => papers.findIndex((paper, i) => normalize(paper.title) === label || String(i + 1) === label))
-                if (indices.some(index => index < 0)) continue
+                const indices = resolveLabel(match[1], papers)
+                if (!indices) continue
                 fragment.append(text.slice(position, match.index))
                 for (const index of Array.from(new Set(indices))) {
                   const link = document.createElement('a')
@@ -71,7 +133,7 @@ export function AnswerSection({ answer, sources, processingTime, isVisible }: An
               }
               if (matched) { fragment.append(text.slice(position)); node.replaceWith(fragment) }
             }
-            
+
             // Highlight code blocks after a brief delay to ensure DOM is updated
             setTimeout(() => {
               if (contentRef.current) {
@@ -88,7 +150,7 @@ export function AnswerSection({ answer, sources, processingTime, isVisible }: An
           }
         }
       }
-      
+
       renderMarkdown()
     }
     return () => { cancelled = true }

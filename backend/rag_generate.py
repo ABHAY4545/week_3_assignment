@@ -170,9 +170,10 @@ class RAGGenerator:
             List of unique source metadata dicts
         """
         seen = {}
-        for result in results:
+        for number, result in enumerate(results, start=1):
             if result.title not in seen:
                 seen[result.title] = {
+                    "excerpts": [],
                     "title": result.title,
                     "authors": result.authors,
                     "pdf_url": result.pdf_url,
@@ -181,6 +182,8 @@ class RAGGenerator:
                     "acm_url": result.acm_url,
                     "abstract_url": result.abstract_url,
                 }
+            # "Source N" in the answer is the Nth excerpt; record which paper supplied it.
+            seen[result.title]["excerpts"].append(number)
         return list(seen.values())
     
     def _call_llm(self, query: str, context: str) -> str:

@@ -88,3 +88,6 @@ frontend/.next-ui/
 
 # Local assistant output
 Claude outputs/
+
+# Deployment env values (never commit)
+backend/render.env

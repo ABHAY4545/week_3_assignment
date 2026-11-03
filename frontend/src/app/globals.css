@@ -409,3 +409,7 @@ details[open] > summary::after { content: "\2212"; }
 /* In compare mode the tabs already label the answer; keep only its timing. */
 .comparison-results .answer-panel .result-heading { justify-content: flex-end; border: 0; padding: 0; margin: -12px 0 12px; }
 .comparison-results .answer-panel .result-heading h2 { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+
+/* Math */
+.prose .katex { font-size: 1.05em; }
+.prose .katex-display { margin: 1.2em 0; overflow-x: auto; overflow-y: hidden; padding: 2px 0; }

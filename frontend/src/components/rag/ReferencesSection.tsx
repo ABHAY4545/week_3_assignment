@@ -1,7 +1,7 @@
 'use client'
 import { useState } from 'react'
 
-export interface Source { title: string; authors?: string; pdf_url?: string; github_link?: string; video_link?: string; acm_url?: string }
+export interface Source { title: string; authors?: string; pdf_url?: string; github_link?: string; video_link?: string; acm_url?: string; excerpts?: number[] }
 
 export function uniqueSources(sources: Source[]) {
   return sources.filter((source, index, list) => list.findIndex(s => s.title === source.title) === index)
