@@ -63,7 +63,7 @@ class GenerationConfig:
     """Configuration for the RAG generator."""
     llm_model: str = field(default_factory=lambda: os.getenv("LLM_MODEL") or "nvidia/nemotron-3-ultra-550b-a55b:free")
     temperature: float = 0.1  # Low temperature for factual answers
-    max_tokens: int = 2000  # Max length of generated answer
+    max_tokens: int = 4000  # Max length of generated answer
     openrouter_api_key: Optional[str] = None  # Will load from env if not set
     refine_query: bool = True  # Whether to refine queries before retrieval
     refinement_model: str = field(default_factory=lambda: os.getenv("REFINEMENT_MODEL") or os.getenv("LLM_MODEL") or "nvidia/nemotron-3-ultra-550b-a55b:free")
